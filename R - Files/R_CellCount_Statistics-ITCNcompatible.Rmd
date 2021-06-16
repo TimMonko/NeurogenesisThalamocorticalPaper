@@ -1,0 +1,507 @@
+---
+title: "Distribution_Statistics"
+author: "Tim Monko"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r global_options, include = FALSE}
+library(tidyverse) # Includes ggplot2, tidyr, dply*r, stringr, readr, tibble, purrr, forcats
+library(svglite) # For exporting plots as .svg graphics to use as vector format
+library(broom) # Tidy's up some statistical outputs
+library(extrafont) # README: https://cran.r-project.org/web/packages/extrafont/README.html   // 
+#font_import(path = 'C:/Users/TimMonko/AppData/Local/Microsoft/Windows/Fonts') # for custom installed .ttf fonts
+library(unicycles)
+library(ggh4x)
+library(MANOVA.RM)
+library(rstatix)
+library(ggpubr)
+extrafont::loadfonts(device = "win", quiet = TRUE) 
+Sys.setenv(R_GSCMD="C:/Program Files/gs/gs9.52/bin/gswin64c.exe") # Set the location for Ghostscript for pdf embedding of fonts, use embed_fonts()
+
+`%notin%` = Negate(`%in%`) # Used to define a group by what is NOT in the group
+```
+
+
+```{r data_management, echo = FALSE}
+# echo = FALSE prevents printing of mundance code (can always set a function clause to echo = TRUE, if needed), by default echo = TRUE
+# Shortcut to set working directy: CTRL + SHFT + H, by default the working directory is in the .Rmd file location
+file.name <- "Gbx2P8all.csv"
+rawdata <- read.csv(file.name)
+
+#Preliminary data manipulation to prepare the dataset, can do math on columns -- mutate(newcolZ = colX + colY)
+#Add column to alter titles for consisteny -- mutate(newcolY = colX)
+#For editing variables use case_when for multiple cases. Case_when(Column == case ~ replacement case). for multi-case -- case_when(Column %in% c(X, Y, Z) ~ replacement case)
+rawdata2 <- as_tibble(rawdata) %>%
+  #mutate(Level = S1.V1) %>%
+  #mutate(Tbr2all = Tbr2.SVZ + Tbr2.IZ) %>%
+  mutate(Level = case_when(Level == 1 ~ 'S1',
+                           Level == 2 ~ 'V1',
+                           Level == 'M1' ~ 'M1')) %>% 
+  mutate(WT.cKO = case_when(WT.cKO == 1 ~ 'WT',
+                            WT.cKO == 2 ~ 'CKO')) %>%
+  mutate(genotype = factor(WT.cKO)) %>%
+  reorder_levels(genotype, c("WT","CKO")) %>%
+  mutate(region = factor(Level)) %>%
+  mutate(pair = factor(Pair)) %>%
+  group_by(region, genotype, pair) 
+  
+summarized.manip <- rawdata2 %>%
+  summarize(across(ROR:PU1.density, ~ mean(., na.rm = TRUE))) %>%
+  mutate(ROR_Brn2 = ROR/Brn2) %>%
+  mutate(Super = ROR + Brn2) %>%
+  mutate(Super_Deep = Super/Ctip2)
+
+summarize.cells <- summarized.manip %>%
+  pivot_longer(cols = 4:19, names_to = "slice", values_to = "number") 
+
+summarize.cells2 <- summarize.cells %>%
+  filter(!is.na(number))
+  
+
+summary.cells <- summarize.cells2 %>%
+  group_by(genotype,slice, region) %>%
+  get_summary_stats() 
+
+
+cells.out <- summarize.cells2 %>%
+  group_by(slice,genotype,region) %>%
+  identify_outliers(number)
+
+
+cells.norm <- summarize.cells2 %>%
+  group_by(slice,genotype,region) %>% shapiro_test(number)
+
+rmpairs.1 <- c(0)
+filt.region.1 <- c('S1', 'M1')
+rmpairs.2 <- c(0)
+filt.region.2 <-c('V1')
+
+rel.summarized <- summarize.cells2 %>%
+  group_by(slice, pair, region) %>%
+  summarize(CKO.rel = number[genotype == "CKO"]/number[genotype == "WT"]) %>%
+  mutate(CKO.log = log(CKO.rel))
+
+summary.rel <- rel.summarized %>%
+  group_by(slice, region) %>%
+  get_summary_stats(CKO.rel)
+
+
+rm.rel.summarized <- rel.summarized %>%
+  filter((pair %notin% c(rmpairs.1) & region %in% filt.region.1)|
+         (pair %notin% c(rmpairs.2) & region %in% filt.region.2))
+
+rm.rel.cells.norm <- rm.rel.summarized %>%
+  group_by(slice,region) %>% shapiro_test(CKO.log)
+
+
+log.t <- rm.rel.summarized %>%
+  group_by(slice, region) %>%
+  t_test(CKO.log ~ 0, mu = 0) %>%
+  add_significance() %>%
+  arrange(region)
+log.t
+
+
+rmpairs.1 <- c(0)
+filt.region.1 <- c('V1','S1')
+rmpairs.2 <- c(0)
+filt.region.2 <-c('M1')
+
+paired.summarize <- summarize.cells2 %>%
+    filter((pair %notin% c(rmpairs.1) & region %in% filt.region.1)|
+         (pair %notin% c(rmpairs.2) & region %in% filt.region.2))
+
+paired.t <- paired.summarize %>%
+  filter(slice == "Super_Deep") %>%
+  group_by(slice,region) %>%
+  t_test(number ~ genotype, paired = TRUE) %>%
+  add_significance() %>%
+  arrange(region)
+
+log.t.bind <- log.t %>%
+  rename(n1 = n, cells = slice)
+
+#replications() seems useful to look at replicates of each terms in forumala 
+summary.bind <-bind_rows(summary.cells, summary.rel)
+t.bind <- bind_rows(log.t.bind, paired.t)
+
+cells.norm
+cells.out
+summary.bind
+t.bind
+write.table(t.bind, "clipboard-16384", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+
+
+```{r plotting_means_new, echo = FALSE}
+# Custom Gray Palette by Tim (no yellow) and slightly reorganized. Originally from: http://jfly.iam.u-tokyo.ac.jp/color/  and http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/#a-colorblind-friendly-palette
+cbp.Rel <-c('#999999', '#E69F00', '#56B4E9', '#009E73', '#D55E00', '#0072B2', '#CC79A7')
+cbp.Genotype <- c('#d95f02', '#7570b3')
+
+plot_logtrans <- function(rmpairs, cells.to.plot, scale.labels, file.name, print.width = 6, print.height = 3) {
+  rel.plot <- rel.summarized %>%
+    filter((pair %notin% c(rmpairs.1) & region %in% filt.region.1)|
+           (pair %notin% c(rmpairs.2) & region %in% filt.region.2)) %>%
+    filter(slice %in% cells.to.plot) %>%
+    reorder_levels(slice, cells.to.plot)
+
+  log.t.plot <- log.t %>% 
+    filter(slice %in% cells.to.plot) %>%
+    mutate(p.signif = recode(p.signif,"ns"= "")) %>%
+    mutate(p = round(p, digits = 3)) %>%
+    mutate(p = format(p, digits = 3)) %>%
+    mutate(p = replace(p, p == 0, "<0.001")) 
+
+
+  plot.logtrans <- ggplot(rel.plot, aes(x=slice, y = CKO.rel, colour = slice, fill = slice, shape = slice)) +
+    facet_nested_wrap(~region, strip.position = 'bottom', nrow = 1) +
+    theme_classic(base_size = 7) +
+    stat_summary(fun = "mean", geom = "col", width = 0.8, show.legend = FALSE) +
+    geom_hline(aes(yintercept = 1), linetype = 'dashed') +
+    geom_jitter(width = 0.1) +
+    stat_pvalue_manual(log.t.plot, x = "slice", label ="{p}", y.position = 1.02, size = 2.5, family = "Helvetica", srt = 0) + # upon later investigation it apperas there is a hide.ns variable
+    scale_fill_manual(values = alpha(cbp.Rel, 0.25), name = NULL, labels = scale.labels) +
+    scale_colour_manual(values = cbp.Rel, name = NULL, labels = scale.labels) +
+    scale_shape_manual(values = c(21,22,24,23,25), name = NULL, labels = scale.labels) + 
+    labs(y = "Rel. Cell#, CKO/WT",
+       x = NULL) + # can use element_blank for no label at all
+    scale_x_discrete(breaks = NULL) +
+    scale_y_continuous(trans = "log10", breaks = seq(0,10,1), minor_breaks = seq(0,10,1), guide = "axis_minor") + #guide + "axis_minor" from ggh4x package
+    guides(color = guide_legend(override.aes = list(size = 2.5))) +
+    coord_cartesian(clip = "off")
+
+
+  plot.logtrans + theme_Tim() # theme(ggh4x.axis.ticks.length.minor = rel(1))
+  ggsave(filename = paste0(file.name,'.png'), device = 'png', width = print.width*1.32, height = print.height*1.32, unit = 'cm', dpi = 1000)
+  ggsave(filename = paste0(file.name,'.svg'), device = 'svg', width = print.width*1.32, height = print.height*1.32, unit = 'cm')
+  print(plot.logtrans + theme_Tim())
+}
+
+#plot_logtrans(rmpairs = c(0), cells.to.plot = c(8,9), scale.labels = c('ROR+EdU+', 'BRN2+EDU+', 'EdU','ROR+EdU+', 'BRN2+EdU+'), file.name = "logtrans-IHC-EdU-new", print.width = 8, print.height = 3)
+
+plot_logtrans(rmpairs = c(0), cells.to.plot = c("Ctip2","ROR","Brn2"), scale.labels = c('CTIP2','ROR', 'BRN2'), file.name = "logtrans-neurons3-col-M1", print.width = 8.5, print.height = 3)
+plot_logtrans(rmpairs = c(0), cells.to.plot = c("CC3.deep","CC3.upper"), scale.labels = c('Deep', 'Super.', 'EdU'), file.name = "logtrans-CC3-col-M1", print.width = 4.5, print.height = 3)
+```
+
+```{r plotting_ratiometric_new, echo = FALSE}
+# Custom Gray Palette by Tim (no yellow) and slightly reorganized. Originally from: http://jfly.iam.u-tokyo.ac.jp/color/  and http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/#a-colorblind-friendly-palette
+cbp.Rel <-c('#999999', '#E69F00', '#56B4E9', '#009E73', '#D55E00', '#0072B2', '#CC79A7')
+cb.Genotype <- c('#d95f02', '#7570b3')
+
+rmpairs.1 <- c(0)
+filt.region.1 <- c('S1', 'M1')
+rmpairs.2 <- c(0)
+filt.region.2 <-c('V1')
+
+
+plot_ratio <- function(rmpairs, cells.to.plot, file.name, print.width = 4, print.height = 3) {
+  ratio.plot <- summarize.cells2 %>%
+    filter((pair %notin% c(rmpairs.1) & region %in% filt.region.1)|
+           (pair %notin% c(rmpairs.2) & region %in% filt.region.2)) %>%
+    filter(slice %in% cells.to.plot)
+
+  paired.t.plot <-  summarize.cells2 %>%
+    filter(pair %notin% c(rmpairs)) %>%
+    filter(slice %in% c(cells.to.plot)) %>%
+    group_by(slice,region) %>%
+    t_test(number ~ genotype, paired = TRUE) %>%
+    add_significance() %>%
+    add_xy_position() %>%
+    mutate(p.signif = recode(p.signif,"ns"= "")) %>%
+    mutate(p = round(p, digits = 3)) %>%
+    mutate(p = format(p, digits = 3)) %>%
+    mutate(p = replace(p, p == 0, "<0.001")) 
+
+  plot.ratio <- ggplot(ratio.plot, aes(x = genotype, y = number, colour = genotype)) +
+    facet_nested_wrap(~region * slice, scales = "fixed", strip.position = 'bottom', nrow = 1) +
+    theme_classic(base_size = 7) +
+    geom_jitter(size = 1, shape = 21, width = 0.03, aes(fill = genotype)) +
+    stat_summary(fun = "mean", geom = "point", size = 5, aes(shape = genotype, color = genotype)) +
+    stat_pvalue_manual(paired.t.plot, label ="{p}", size = 2.5, family = "Helvetica", bracket.nudge.y = 0.005) +
+    labs(y = 'Ratio',
+       x = element_blank()) +
+    scale_x_discrete(breaks = NULL) +
+    scale_colour_manual(values = cbp.Genotype) +
+    scale_fill_manual(values = alpha(cbp.Genotype, 0.25)) +
+    scale_shape_manual(values = c(7,10)) +
+    guides(fill = guide_legend(title = "Genotype"),
+           color = guide_legend(title = "Genotype",   
+                              label.position = 'left',
+                              label.hjust = 1),
+           shape = guide_legend(title = "Genotype",
+                              override.aes = list(size = 2.5),   
+                              label.position = 'left',
+                              label.hjust = 1))+
+    coord_cartesian(clip = "off") #size = 3 reduces the key icon for the colour header to a smaller size 
+  plot.ratio + theme_Tim()
+  ggsave(filename = paste0(file.name,'.png'), device = 'png', width = print.width*1.32, height = print.height*1.32, unit = 'cm', dpi = 1000)
+  ggsave(filename = paste0(file.name,'.svg'), device = 'svg', width = print.width*1.32, height = print.height*1.32, unit = 'cm')
+  print(plot.ratio + theme_Tim())
+}
+
+
+plot_ratio(rmpairs = c(0), cells.to.plot = c("Super_Deep"), file.name = "ratio-Super_Deep-M1", print.width = 6.5, print.height = 3.5)
+plot_ratio(rmpairs = c(0), cells.to.plot = c("ROR_Brn2"), file.name = "ratio-ROR_BRN2-M1", print.width = 6.5, print.height = 3.5)
+
+
+```
+
+
+``` {r plotting_distribution_WTCKO_by_pairs, echo = FALSE}
+
+## Trying to plot the distribution of all cells along one axis 
+# Y-axis- top = 0, distance from pial surface
+# X-axis density 
+
+cbp.Dist <- c('#E69F00', '#56B4E9', '#009E73',  '#CC79A7') #'#D55E00', '#0072B2',
+
+cells.to.dist <- c(1,2,3)
+rmpairs.dist <- c(0)
+
+dist.centers <- all.centers %>%
+  filter(between(mx.abs.right, 0, 600)) %>%
+  filter(slice %in% cells.to.dist)
+
+center.means <- dist.centers %>%
+  group_by(genotype, region, slice) %>%
+  filter(pair%notin% c(rmpairs)) %>%
+  summarize(group.medx = median(mx.abs.right), group.mx = mean(mx.abs.right))
+
+dist.plot <- dist.centers %>%
+  filter(pair %notin% c(rmpairs))
+
+
+plot.dist <- ggplot(dist.plot, aes(mx.abs.right, color = slice,fill = slice)) +
+  facet_nested_wrap(~ genotype, nrow = 1, scales = "free_x") +
+  theme_classic(base_size = 7) +
+  geom_density(kernel = "gaussian", bw = "nrd0", adjust = 0.5, alpha = 0.3, aes(y = ..count..)) +
+  #stat_summary(fun = "median", geom = "vline", aes(x=0.1, y = mx.abs.right, xintercept = stat(y), group = slice)) +
+  geom_vline(data = center.means, aes(xintercept = group.medx, color = slice), linetype = "dashed") +
+  scale_fill_manual(values = cbp.Dist, name = NULL, labels = c('ROR', 'Brn2', 'EdU', 'ROR+Brn2+')) +
+  scale_color_manual(values = cbp.Dist, guide = FALSE) +
+  coord_flip() + 
+  scale_x_reverse(limits = c(600,0),n.break=6) +
+  scale_y_continuous(expand = c(0.001,0), breaks = NULL, labels = NULL) +
+  labs(y = NULL,
+       x = "Distance from pia, μm") +
+  guides(fill = guide_legend(label.position = 'left',
+                             label.hjust = 1))
+
+plot.dist
+
+
+# #There is something different here about how the median is calculated......it appears to matter on the limits of the scale_x_, if smaller limits than median slides up to accomodate that bin width only (which could be useful, but is decidely annoying if wanting to zoom in - perhaps a good check though zooming in)
+# plot.ridges <- ggplot(dist.plot, aes(y = slice, x = mx.abs.right, fill = slice)) +
+#   facet_nested_wrap(~ genotype, nrow = 1, scales = "free_x") +
+#   theme_classic(base_size = 7) +
+#   #geom_density_ridges(alpha = 0.3, scale = 5) +
+#   stat_density_ridges(quantile_lines = TRUE, quantiles = 2, alpha = 0.3) +
+#   geom_vline(data = center.means, aes(xintercept = group.medx, color = slice), linetype = "dashed") +
+#   scale_fill_manual(values = cbp.Dist, name = NULL, labels = c('ROR', 'Brn2', 'EdU', 'ROR+Brn2+')) +
+# #  scale_color_manual(values = cbp.Dist, guide = FALSE) +
+#   coord_flip() + 
+#   scale_x_reverse(limits = c(300,0),n.break=6) +
+# #  scale_y_continuous(expand = c(0.001,0), breaks = NULL, labels = NULL) +
+#   labs(y = NULL,
+#        x = "Distance from pia, μm") +
+#   guides(fill = guide_legend(label.position = 'left',
+#                              label.hjust = 1))
+# 
+# plot.ridges
+```
+
+```{r distribution_save, echo=FALSE}
+plot.dist + theme_Tim()  # theme_Tim was adapted from the Ib packaged and installed now using Tim Monko's custom package 'unicycles'
+
+
+ggsave(filename = paste0('New_DistributionPairs2count-new.png'), device = 'png', width = 8*1.32, height = 4*1.32, unit = 'cm', dpi = 1000)
+ggsave(filename = paste0('New_DistributionPairs2count-new.svg'), device = 'svg', width = 8*1.32, height = 4*1.32, unit = 'cm')
+
+```
+
+```{r distribution_stats_plots, echo=FALSE}
+
+pull_dist <- function(geno, slice.pull, variable){
+  all.centers %>%
+  filter(genotype == geno) %>%
+  filter(slice == slice.pull) %>%
+  filter(between(mx.abs.right, 0, 600)) %>%
+  pull({{variable}})
+}
+
+dist.x <- pull_dist("CKO", 2, mx.abs.right)
+dist.y <- pull_dist("WT", 2, mx.abs.right)
+
+ks.test(dist.x, dist.y)
+
+##grouping by cells keeps each section in tact, without having to group by file, this gives the percentage per section, I think (see other file)
+count.random <- all.centers %>%
+  mutate(rand = runif(n(), min=50, max=300)) %>%
+  mutate(binned.mx.rel = cut(rand, breaks = seq(50,300,25), right = TRUE, ordered_result = TRUE)) %>%
+  filter(!is.na(binned.mx.rel)) %>%
+  group_by(genotype, slice, pair, region, binned.mx.rel,file,cells) %>%
+  summarize(rand.count.rel = n()/n_distinct(file)) %>% 
+  replace_na(list(rand.count.rel = 0)) %>%
+  mutate(count.perc = rand.count.rel/cells)
+
+count <- all.centers %>%
+  mutate(binned.mx.rel = cut(mx.abs.right, breaks = seq(50,300,25), right = TRUE, ordered_result = TRUE)) %>%
+  filter(!is.na(binned.mx.rel)) %>%
+  group_by(genotype, slice, pair, region, binned.mx.rel,file,cells) %>%
+  summarize(count.rel = n()/n_distinct(file)) %>% 
+  replace_na(list(count.rel = 0)) %>%
+  mutate(count.perc = count.rel/cells) 
+
+
+count.random2 <- count.random %>% ungroup() %>% select(genotype:file)
+count2 <- count %>% ungroup()
+count.join2 <- left_join(count.random2, count2) %>% 
+    replace_na(list(count.rel = 0)) 
+
+
+#the juicy bits to get ROREdU / TOTAL EdU 
+count.x <- count.join2 %>% 
+  filter(slice == 1) %>%
+  ungroup() %>%
+  select(genotype:count.rel, -cells, -slice) 
+count.y <- count.join2 %>%
+  filter(slice == 6) %>%
+  ungroup() %>%
+  select(genotype:count.rel, -cells, -slice) 
+
+stat.count.join <- left_join(count.x, count.y, by = c("genotype", "pair", "region", "binned.mx.rel", "file")) %>%
+  replace_na(list(count.rel.y = 0)) %>%
+  replace_na(list(count.rel.x = 0)) %>%
+  mutate(count.y_count.x = count.rel.y/count.rel.x) %>%
+  mutate(diff.x_y = count.rel.x - count.rel.y) %>%
+  mutate(rel.diff.xy_x = (count.rel.x - count.rel.y)/count.rel.x)
+
+
+
+rmpairs.stat <- c(0)
+
+stat.count.join.mean <- stat.count.join %>%
+  group_by(genotype,pair,region,binned.mx.rel) %>%
+  summarize(rel.mean = mean(count.y_count.x), diff.mean = mean(diff.x_y), rel.diff.mean = mean(rel.diff.xy_x)) %>%
+  replace_na(list(rel.mean = 0)) %>%
+  filter(pair %notin% rmpairs.stat) %>%
+  ungroup() %>%
+  mutate(id = paste0(genotype,pair))
+
+
+# Should not be used because the repeated measures (i.e treating each bin as an interdependent DV) is not linear
+#res.RM <- RM(rel.mean ~genotype * binned.mx.rel, no.subf = 2, data = as.data.frame(stat.count.join.mean), subject = "pair")
+#summary(res.RM)
+
+# Linear models can be used here because the bins are treated distinctly
+res.lm <- lm(rel.mean ~ genotype * binned.mx.rel, data = stat.count.join.mean)
+summary(res.lm)
+summary.aov(res.lm)
+
+#Repeated measures if use an error column??? id = genotype+pair to identify such that binned.mx.rel is considered within a single id (instead of genotype WT, pair 7, bin1 as 1 id)
+library(lme4)
+res.lmer <- lmer(rel.mean ~ genotype * binned.mx.rel + (1|id), data = stat.count.join.mean)
+summary(res.lmer)
+anova(res.lmer)
+
+
+res.lme <- lme(rel.mean ~ genotype * binned.mx.rel, random = ~ 1|id, data = stat.count.join.mean)
+summary(res.lme)
+anova(res.lme)
+
+
+slice.to.dist <- c(1,3,6)
+plot.count <- count.join2 %>%
+  filter(slice %in% slice.to.dist) %>%
+  group_by(genotype,pair,slice, region,binned.mx.rel) %>%
+  summarize(rel.mean = mean(count.rel), perc.mean = mean(count.perc)) %>%
+  replace_na(list(rel.mean = 0)) %>%
+  replace_na(list(perc.mean = 0)) %>%
+  mutate(id = paste0(genotype,slice))
+
+
+# ## might just be better to show faceted anyways
+# bin.ggplot <- ggplot(data = plot.count, aes(x=binned.mx.rel, y = perc.mean, color = slice, shape = genotype, linetype = genotype)) +
+#   facet_nested_wrap(~ region, nrow = 1, scales = "free_x") +
+#   theme_classic(base_size = 7) +
+#   geom_jitter(size = 1, position = position_dodge(width = 0.5), aes(group = id)) +
+#   stat_summary(fun = "mean", geom = "line", size = 0.5, aes(group = id), position = position_dodge(width = 0.5)) +
+#   theme(axis.text.x = element_text(angle = 90)) +
+#   scale_x_discrete(limits=rev) +
+#   #scale_fill_manual(values = cbp.Dist, name = NULL, labels = c('ROR', 'Brn2', 'EdU', 'ROR+Brn2+')) +
+#   scale_colour_manual(values = cbp.Dist) +
+#   scale_shape_manual(values = c(1,2,4)) +
+#   coord_flip() + 
+#   labs(x = "Distance from pia, μm",
+#        y = "#Cells") +
+#   guides(fill = guide_legend(label.position = 'left',
+#                              label.hjust = 1))
+# 
+# 
+# 
+# bin.ggplot + theme_Tim()
+
+## might just be better to show faceted anyways
+bin.facet.ggplot <- ggplot(data = plot.count, aes(x=binned.mx.rel, y = perc.mean, color = slice, fill = slice, shape = slice)) +
+  facet_nested_wrap(~ region * genotype, nrow = 1, scales = "fixed") +
+  theme_classic(base_size = 7) +
+  #geom_jitter(size = 0.7, width = 0.1) +
+  stat_summary(fun = "mean", geom = "line", size = 1, alpha = 0.8, aes(group = id)) +
+  stat_summary(fun = "mean", geom = "point", size = 2, alpha = 0.5, aes(group = id)) +
+  stat_summary(fun.data = "mean_se", geom = "errorbar", size = 0.5, alpha = 0.8, aes(group = id), width = 0.5) +
+  #stat_boxplot(linetype = 1,outlier.size = 0.5, size = 0.3) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  scale_x_discrete(limits=rev) +
+  #scale_fill_manual(values = cbp.Dist, name = NULL, labels = c('ROR', 'Brn2', 'EdU', 'ROR+Brn2+')) +
+  scale_colour_manual(values = cbp.Dist, name = NULL, labels = c('ROR', 'EdU', 'ROR+EdU+')) +
+  scale_fill_manual(values = alpha(cbp.Dist, 0.4), name = NULL, labels = c('ROR', 'EdU', 'ROR+EdU+')) +
+  scale_shape_manual(values = c(21,22,24), name = NULL, labels = c('ROR', 'EdU', 'ROR+EdU+')) +
+  scale_linetype_manual(values = c(1,2,4), name = NULL, labels = c('ROR', 'EdU', 'ROR+EdU+')) +
+  coord_flip() + 
+  labs(x = "Distance from pia, μm",
+       y = "Cells in bin/All cells") +
+  guides(shape = guide_legend(),
+         linetype = guide_legend(),
+         color = guide_legend(label.position = 'left',
+                             label.hjust = 1))
+
+
+
+bin.facet.ggplot + theme_Tim()
+
+# ## might just be better to show faceted anyways
+# bin.ratio.ggplot <- ggplot(data = stat.count.join.mean, aes(x=binned.mx.rel, y = rel.mean, color = genotype, shape = genotype, linetype = genotype)) +
+#   facet_nested_wrap(~ region, nrow = 1, scales = "free_x") +
+#   theme_classic(base_size = 7) +
+#   geom_jitter(size = 1, width = 0.1) +
+#   #geom_boxplot() +
+#   stat_summary(fun = "mean", geom = "line", size = 0.5, aes(group = genotype)) +
+#   theme(axis.text.x = element_text(angle = 90)) +
+#   scale_x_discrete(limits=rev) +
+#   #scale_fill_manual(values = cbp.Dist, name = NULL, labels = c('ROR', 'Brn2', 'EdU', 'ROR+Brn2+')) +
+#   scale_colour_manual(values = cbp.Dist) +
+#   scale_shape_manual(values = c(1,2,4)) +
+#   coord_flip() + 
+#   labs(x = "Distance from pia, μm",
+#        y = "%Cells") +
+#   guides(fill = guide_legend(label.position = 'left',
+#                              label.hjust = 1))
+# 
+# 
+# 
+# bin.ratio.ggplot + theme_Tim()
+
+```
+
+
+```{r distribution_save, echo=FALSE}
+bin.facet.ggplot +theme_Tim() # theme_Tim was adapted from the Ib packaged and installed now using Tim Monko's custom package 'unicycles'
+
+
+ggsave(filename = paste0('DistBoxesmeanSE2-new.png'), device = 'png', width = 12*1.32, height = 5*1.32, unit = 'cm', dpi = 1000)
+ggsave(filename = paste0('DistBoxesmeanSE2-new.svg'), device = 'svg', width = 12*1.32, height = 5*1.32, unit = 'cm')
+
+```
